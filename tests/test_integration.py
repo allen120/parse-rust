@@ -45,6 +45,14 @@ def test_float_type():
     assert isinstance(r[0], float)
 
 
+def test_negative_float_type():
+    from parse_rust import parse
+
+    r = parse("{:f}", "-19.99")
+    assert r is not None
+    assert abs(r[0] + 19.99) < 1e-10
+
+
 def test_hex_type():
     """Test :x hexadecimal type specifier."""
     from parse_rust import parse
@@ -221,6 +229,58 @@ def test_parser_properties():
     assert "name" in p.named_fields
     assert len(p.fixed_fields) == 1
     assert "User" in p.format
+
+
+def test_repeated_named_field_matches():
+    from parse_rust import parse
+
+    r = parse("{name:w} {name:w}", "Alice Alice")
+    assert r is not None
+    assert r["name"] == "Alice"
+
+
+def test_repeated_named_field_type_mismatch_raises():
+    import pytest
+    from parse_rust import parse, RepeatedNameError
+
+    with pytest.raises(RepeatedNameError):
+        parse("{name:w} {name:d}", "Alice 30")
+
+
+def test_datetime_iso_returns_datetime():
+    from datetime import datetime, timezone
+    from parse_rust import parse
+
+    r = parse("At {:ti}", "At 1972-01-20T10:21:36Z")
+    assert r is not None
+    assert r[0] == datetime(1972, 1, 20, 10, 21, 36, tzinfo=timezone.utc)
+
+
+def test_datetime_email_returns_datetime():
+    from datetime import datetime, timezone, timedelta
+    from parse_rust import parse
+
+    r = parse("At {:te}", "At Mon, 20 Jan 1972 10:21:36 +1000")
+    assert r is not None
+    assert r[0] == datetime(1972, 1, 20, 10, 21, 36, tzinfo=timezone(timedelta(hours=10)))
+
+
+def test_time_only_returns_time():
+    from datetime import time, timezone, timedelta
+    from parse_rust import parse
+
+    r = parse("At {:tt}", "At 10:21:36 PM -0530")
+    assert r is not None
+    assert r[0] == time(22, 21, 36, tzinfo=timezone(timedelta(hours=-5, minutes=-30)))
+
+
+def test_custom_datetime_format_returns_date():
+    from datetime import date
+    from parse_rust import parse
+
+    r = parse("On {:%Y-%m-%d}", "On 2023-11-25")
+    assert r is not None
+    assert r[0] == date(2023, 11, 25)
 
 
 if __name__ == "__main__":

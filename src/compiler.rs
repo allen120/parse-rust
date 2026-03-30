@@ -33,6 +33,7 @@ pub struct FormatSpec {
     pub width: Option<usize>,
     pub grouping: Option<char>,
     pub precision: Option<usize>,
+    pub format_string: String,
     pub format_type: FormatType,
 }
 
@@ -46,6 +47,7 @@ impl Default for FormatSpec {
             width: None,
             grouping: None,
             precision: None,
+            format_string: String::new(),
             format_type: FormatType::Default,
         }
     }
@@ -58,8 +60,12 @@ impl Default for FormatSpec {
 pub struct FieldInfo {
     /// The field name (empty string for anonymous/positional fields).
     pub name: String,
+    /// The regex group name used to extract this field, if named.
+    pub group_name: Option<String>,
     /// Whether this is a named field (vs positional).
     pub is_named: bool,
+    /// If set, this field must equal an earlier named field.
+    pub repeated_of: Option<String>,
     /// The positional index for anonymous fields.
     pub index: Option<usize>,
     /// The parsed format specification.
@@ -119,6 +125,7 @@ struct FormatCompiler {
     fixed_fields: Vec<usize>,
     fixed_count: usize,
     used_group_names: HashMap<String, String>,
+    name_types: HashMap<String, String>,
 }
 
 impl FormatCompiler {
@@ -133,6 +140,7 @@ impl FormatCompiler {
             fixed_fields: Vec::new(),
             fixed_count: 0,
             used_group_names: HashMap::new(),
+            name_types: HashMap::new(),
         }
     }
 
@@ -261,6 +269,7 @@ impl FormatCompiler {
 
         // Parse the format specification
         let spec = parse_format_spec(format_spec_str)?;
+        let spec_text = spec.format_string.clone();
 
         // Determine if named or positional
         let is_named = !name.is_empty()
@@ -270,7 +279,35 @@ impl FormatCompiler {
                 .map_or(false, |c| c.is_alphabetic() || c == '_');
 
         let group_name = if is_named {
+            if let Some(existing_type) = self.name_types.get(&name) {
+                if existing_type != &spec_text {
+                    return Err(format!(
+                        "RepeatedNameError: field type '{}' for field '{}' does not match previous type '{}'",
+                        spec_text, name, existing_type
+                    ));
+                }
+                let repeated_group = self.to_group_name(&format!("{}_repeat_{}", name, self.group_index));
+                let field_info = FieldInfo {
+                    name: name.clone(),
+                    group_name: Some(repeated_group.clone()),
+                    is_named: true,
+                    repeated_of: Some(name.clone()),
+                    index: None,
+                    spec: spec.clone(),
+                    format_type: spec.format_type.clone(),
+                };
+                self.fields.push(field_info);
+
+                let (mut type_pattern, extra_groups) = spec.format_type.regex_pattern();
+                if spec.format_type.is_numeric() {
+                    type_pattern = format!("[-+ ]?{}", type_pattern);
+                }
+
+                self.group_index += 1 + extra_groups;
+                return Ok(format!("(?P<{}>{})", repeated_group, type_pattern));
+            }
             let gn = self.to_group_name(&name);
+            self.name_types.insert(name.clone(), spec_text);
             self.named_fields.push(name.clone());
             self.group_to_field
                 .insert(gn.clone(), name.clone());
@@ -286,7 +323,9 @@ impl FormatCompiler {
 
         let field_info = FieldInfo {
             name: name.clone(),
+            group_name: group_name.clone(),
             is_named,
+            repeated_of: None,
             index: if is_named { None } else { Some(self.fixed_count - 1) },
             spec: spec.clone(),
             format_type: spec.format_type.clone(),
@@ -294,7 +333,11 @@ impl FormatCompiler {
         self.fields.push(field_info);
 
         // Get the regex pattern for this type
-        let (type_pattern, extra_groups) = spec.format_type.regex_pattern();
+        let (mut type_pattern, extra_groups) = spec.format_type.regex_pattern();
+
+        if spec.format_type.is_numeric() {
+            type_pattern = format!("[-+ ]?{}", type_pattern);
+        }
 
         // Build the capture group pattern
         let pattern = if let Some(ref gn) = group_name {
@@ -359,6 +402,7 @@ pub fn parse_format_spec(spec: &str) -> Result<FormatSpec, String> {
     }
 
     let mut result = FormatSpec::default();
+    result.format_string = spec.to_string();
     let chars: Vec<char> = spec.chars().collect();
     let len = chars.len();
     let mut pos = 0;
@@ -426,9 +470,13 @@ pub fn parse_format_spec(spec: &str) -> Result<FormatSpec, String> {
     // Remaining characters form the type specifier
     if pos < len {
         let type_str: String = chars[pos..].iter().collect();
-        result.format_type = FormatType::from_str(&type_str).ok_or_else(|| {
-            format!("Unknown format type: '{}'", type_str)
-        })?;
+        result.format_type = if let Some(fmt_type) = FormatType::from_str(&type_str) {
+            fmt_type
+        } else if type_str.contains('%') {
+            FormatType::CustomDateTime(type_str)
+        } else {
+            return Err(format!("Unknown format type: '{}'", type_str));
+        };
     }
 
     Ok(result)

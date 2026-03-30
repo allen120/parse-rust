@@ -35,9 +35,8 @@ pub enum ParseValue {
     Int(i64),
     /// A floating-point value (from :f, :e, :g specifiers).
     Float(f64),
-    /// A datetime string value (from :ti, :te, etc. specifiers).
-    /// Stored as the matched string for Python-side conversion.
-    DateTime(String),
+    /// A datetime string value with its original format specifier.
+    DateTime { raw: String, format: String },
     /// A percentage value (from :% specifier), stored as float (already divided by 100).
     Percent(f64),
 }
@@ -49,9 +48,94 @@ impl ParseValue {
             ParseValue::Str(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
             ParseValue::Int(i) => i.into_pyobject(py).unwrap().into_any().unbind(),
             ParseValue::Float(f) => f.into_pyobject(py).unwrap().into_any().unbind(),
-            ParseValue::DateTime(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
+            ParseValue::DateTime { raw, format } => {
+                datetime_to_pyobject(py, raw, format).unwrap_or_else(|_| {
+                    raw.into_pyobject(py).unwrap().into_any().unbind()
+                })
+            }
             ParseValue::Percent(f) => f.into_pyobject(py).unwrap().into_any().unbind(),
         }
+    }
+}
+
+fn datetime_to_pyobject(py: Python<'_>, raw: &str, format: &str) -> PyResult<PyObject> {
+    let dt_mod = PyModule::import(py, "datetime")?;
+    let datetime_cls = dt_mod.getattr("datetime")?;
+
+    match format {
+        "ti" => {
+            let normalized = if let Some(stripped) = raw.strip_suffix('Z') {
+                format!("{}+00:00", stripped)
+            } else if raw.contains('T') || raw.contains(' ') {
+                raw.to_string()
+            } else {
+                format!("{}T00:00:00", raw)
+            };
+            Ok(datetime_cls
+                .call_method1("fromisoformat", (normalized,))?
+                .into_any()
+                .unbind())
+        }
+        "te" => Ok(PyModule::import(py, "email.utils")?
+            .getattr("parsedate_to_datetime")?
+            .call1((raw,))?
+            .into_any()
+            .unbind()),
+        "tt" => {
+            let formats = [
+                "%I:%M:%S.%f %p %z",
+                "%I:%M:%S %p %z",
+                "%I:%M:%S.%f %p",
+                "%I:%M:%S %p",
+                "%H:%M:%S.%f %p %z",
+                "%H:%M:%S %p %z",
+                "%H:%M:%S.%f %p",
+                "%H:%M:%S %p",
+                "%H:%M:%S.%f %z",
+                "%H:%M:%S %z",
+                "%H:%M:%S.%f",
+                "%H:%M:%S",
+                "%I:%M %p %z",
+                "%I:%M %p",
+                "%H:%M %p %z",
+                "%H:%M %p",
+                "%H:%M %z",
+                "%H:%M",
+            ];
+            for fmt in formats {
+                if let Ok(value) = datetime_cls.call_method1("strptime", (raw, fmt)) {
+                    let method = if fmt.contains("%z") { "timetz" } else { "time" };
+                    return Ok(value.call_method0(method)?.into_any().unbind());
+                }
+            }
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported time format '{}'",
+                raw
+            )))
+        }
+        custom if custom.contains('%') => {
+            let parsed = datetime_cls.call_method1("strptime", (raw, custom))?;
+            let is_date = ["%a", "%A", "%w", "%d", "%b", "%B", "%m", "%y", "%Y", "%j", "%U", "%W"]
+                .iter()
+                .any(|token| custom.contains(token));
+            let is_time = ["%H", "%I", "%p", "%M", "%S", "%f", "%z"]
+                .iter()
+                .any(|token| custom.contains(token));
+
+            if is_date && is_time {
+                Ok(parsed.into_any().unbind())
+            } else if is_date {
+                Ok(parsed.call_method0("date")?.into_any().unbind())
+            } else if is_time {
+                Ok(parsed.call_method0("time")?.into_any().unbind())
+            } else {
+                Ok(parsed.into_any().unbind())
+            }
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported datetime format '{}'",
+            format
+        ))),
     }
 }
 

@@ -48,6 +48,7 @@ pub mod result;
 pub mod types;
 
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 use crate::parser::Parser;
 use crate::result::PyParseResult;
 
@@ -61,6 +62,15 @@ struct PyParser {
     inner: Parser,
 }
 
+fn map_compile_error(py: Python<'_>, err: String) -> PyErr {
+    if err.starts_with("RepeatedNameError:") {
+        if let Ok(exc_type) = py.import("parse_rust").and_then(|m| m.getattr("RepeatedNameError")) {
+            return pyo3::PyErr::from_type(exc_type.downcast_into::<PyType>().unwrap(), err);
+        }
+    }
+    pyo3::exceptions::PyValueError::new_err(err)
+}
+
 #[pymethods]
 impl PyParser {
     /// Create a new compiled parser.
@@ -70,9 +80,9 @@ impl PyParser {
     ///     case_sensitive: Whether matching should be case-sensitive (default: False).
     #[new]
     #[pyo3(signature = (format, case_sensitive=false))]
-    fn new(format: &str, case_sensitive: bool) -> PyResult<Self> {
+    fn new(py: Python<'_>, format: &str, case_sensitive: bool) -> PyResult<Self> {
         let inner = Parser::new(format, case_sensitive)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+            .map_err(|e| map_compile_error(py, e))?;
         Ok(Self { inner })
     }
 
@@ -192,9 +202,11 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ///     <Result (30,) {name: 'Alice'}>
     #[pyfn(m)]
     #[pyo3(signature = (format, string, case_sensitive=false))]
-    fn parse(format: &str, string: &str, case_sensitive: bool) -> Option<PyParseResult> {
-        crate::parser::parse(format, string, case_sensitive)
-            .map(|r| PyParseResult { inner: r })
+    fn parse(py: Python<'_>, format: &str, string: &str, case_sensitive: bool) -> PyResult<Option<PyParseResult>> {
+        match crate::parser::Parser::new(format, case_sensitive) {
+            Ok(parser) => Ok(parser.parse(string).map(|r| PyParseResult { inner: r })),
+            Err(err) => Err(map_compile_error(py, err)),
+        }
     }
 
     /// Search for a format pattern anywhere in a string.
@@ -276,12 +288,14 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ///     <Result () {name: 'Bob'}>
     #[pyfn(m)]
     #[pyo3(signature = (format, case_sensitive=false))]
-    fn compile(format: &str, case_sensitive: bool) -> PyResult<PyParser> {
-        PyParser::new(format, case_sensitive)
+    fn compile(py: Python<'_>, format: &str, case_sensitive: bool) -> PyResult<PyParser> {
+        PyParser::new(py, format, case_sensitive)
     }
 
     m.add_class::<PyParser>()?;
     m.add_class::<PyParseResult>()?;
+    let repeated = m.py().get_type::<pyo3::exceptions::PyValueError>();
+    m.add("RepeatedNameError", repeated)?;
     m.add("__version__", "0.1.0")?;
 
     Ok(())

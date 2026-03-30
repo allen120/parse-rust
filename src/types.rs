@@ -3,6 +3,7 @@
 //! Handles conversion of matched strings to their target types
 //! based on format specifiers like :d (integer), :f (float), etc.
 
+use crate::compiler::FormatSpec;
 use crate::result::ParseValue;
 
 /// All supported format type specifiers.
@@ -61,6 +62,8 @@ pub enum FormatType {
     TimeOnly,
     /// `ts` - Syslog datetime (Mon DD HH:MM:SS).
     DateTimeSyslog,
+    /// Custom strftime/strptime-like datetime format.
+    CustomDateTime(String),
 }
 
 impl FormatType {
@@ -103,63 +106,64 @@ impl FormatType {
     /// Returns a regex pattern string that matches valid input
     /// for this type, along with the number of capture groups
     /// in the pattern.
-    pub fn regex_pattern(&self) -> (&str, usize) {
+    pub fn regex_pattern(&self) -> (String, usize) {
         match self {
-            FormatType::Default => (".+?", 0),
-            FormatType::NonWhitespace => (r"\S+", 0),
-            FormatType::Word => (r"\w+", 0),
-            FormatType::NonWord => (r"\W+", 0),
-            FormatType::Letters => ("[A-Za-z]+", 0),
-            FormatType::Whitespace => (r"\s+", 0),
-            FormatType::NonDigit => (r"\D+", 0),
-            FormatType::Decimal => (r"[-+ ]?\d+", 0),
-            FormatType::Binary => (r"(0[bB])?[01]+", 1),
-            FormatType::Octal => (r"(0[oO])?[0-7]+", 1),
-            FormatType::Hex => (r"(0[xX])?[0-9a-fA-F]+", 1),
-            FormatType::NumberWithSeparator => (r"\d{1,3}([,._]\d{3})*", 1),
-            FormatType::Float => (r"\d*\.\d+", 0),
-            FormatType::FloatDecimal => (r"\d*\.\d+", 0),
+            FormatType::Default => (".+?".to_string(), 0),
+            FormatType::NonWhitespace => (r"\S+".to_string(), 0),
+            FormatType::Word => (r"\w+".to_string(), 0),
+            FormatType::NonWord => (r"\W+".to_string(), 0),
+            FormatType::Letters => ("[A-Za-z]+".to_string(), 0),
+            FormatType::Whitespace => (r"\s+".to_string(), 0),
+            FormatType::NonDigit => (r"\D+".to_string(), 0),
+            FormatType::Decimal => (r"\d+".to_string(), 0),
+            FormatType::Binary => (r"(0[bB])?[01]+".to_string(), 1),
+            FormatType::Octal => (r"(0[oO])?[0-7]+".to_string(), 1),
+            FormatType::Hex => (r"(0[xX])?[0-9a-fA-F]+".to_string(), 1),
+            FormatType::NumberWithSeparator => (r"\d{1,3}([,._]\d{3})*".to_string(), 1),
+            FormatType::Float => (r"\d*\.\d+".to_string(), 0),
+            FormatType::FloatDecimal => (r"\d*\.\d+".to_string(), 0),
             FormatType::Scientific => (
-                r"\d*\.\d+[eE][-+]?\d+|nan|NAN|[-+]?inf|[-+]?INF",
+                r"\d*\.\d+[eE][-+]?\d+|nan|NAN|inf|INF".to_string(),
                 0,
             ),
             FormatType::GeneralFloat => (
-                r"\d+(\.\d+)?([eE][-+]?\d+)?|nan|NAN|[-+]?inf|[-+]?INF",
+                r"\d+(\.\d+)?([eE][-+]?\d+)?|nan|NAN|inf|INF".to_string(),
                 2,
             ),
-            FormatType::Percentage => (r"\d+(\.\d+)?%", 1),
+            FormatType::Percentage => (r"\d+(\.\d+)?%".to_string(), 1),
             FormatType::DateTimeISO => (
-                r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:?\d\d)?|\d{4}-\d\d-\d\d",
+                r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:?\d\d)?|\d{4}-\d\d-\d\d".to_string(),
                 3,
             ),
             FormatType::DateTimeEmail => (
-                r"\w{3},?\s+\d\d?\s+\w{3}\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*(\w+|[+-]\d{4})?",
+                r"\w{3},?\s+\d\d?\s+\w{3}\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*(\w+|[+-]\d{4})?".to_string(),
                 2,
             ),
             FormatType::DateTimeUS => (
-                r"(\d\d?|\w{3})\s+\d\d?\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?",
+                r"(\d\d?|\w{3})\s+\d\d?\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?".to_string(),
                 4,
             ),
             FormatType::DateTimeGeneric => (
-                r"\d\d?[-/](\d\d?|\w{3})[-/]\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?",
+                r"\d\d?[-/](\d\d?|\w{3})[-/]\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?".to_string(),
                 4,
             ),
             FormatType::DateTimeHTTP => (
-                r"\d\d?[-/]\w{3}[-/]\d{4}:\d\d:\d\d:\d\d\s*(\w+|[+-]\d{4})?",
+                r"\d\d?[-/]\w{3}[-/]\d{4}:\d\d:\d\d:\d\d\s*(\w+|[+-]\d{4})?".to_string(),
                 1,
             ),
             FormatType::DateTimeCTime => (
-                r"\w{3}\s+\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d\s+\d{4}",
+                r"\w{3}\s+\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d\s+\d{4}".to_string(),
                 0,
             ),
             FormatType::TimeOnly => (
-                r"\d\d:\d\d(:\d\d(\.\d+)?)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?",
+                r"\d{1,2}:\d{1,2}(:\d{1,2}(\.\d+)?)?\s*([AP]M)?\s*(Z|[+-]\d\d:?\d\d)?".to_string(),
                 4,
             ),
             FormatType::DateTimeSyslog => (
-                r"\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d",
+                r"\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d".to_string(),
                 0,
             ),
+            FormatType::CustomDateTime(format) => (datetime_format_to_regex(format), 0),
         }
     }
 
@@ -192,6 +196,7 @@ impl FormatType {
                 | FormatType::DateTimeCTime
                 | FormatType::TimeOnly
                 | FormatType::DateTimeSyslog
+                | FormatType::CustomDateTime(_)
         )
     }
 }
@@ -199,9 +204,9 @@ impl FormatType {
 /// Convert a matched string to a ParseValue according to the FormatType.
 ///
 /// This performs the actual type conversion after a successful regex match.
-/// For datetime types, the raw string is preserved for Python-side conversion.
-pub fn convert_value(s: &str, fmt_type: &FormatType) -> Result<ParseValue, String> {
-    match fmt_type {
+/// For datetime types, the raw string and format are preserved for Python-side conversion.
+pub fn convert_value(s: &str, spec: &FormatSpec) -> Result<ParseValue, String> {
+    match &spec.format_type {
         FormatType::Default | FormatType::NonWhitespace | FormatType::Word
         | FormatType::NonWord | FormatType::Letters | FormatType::Whitespace
         | FormatType::NonDigit => Ok(ParseValue::Str(s.to_string())),
@@ -236,10 +241,63 @@ pub fn convert_value(s: &str, fmt_type: &FormatType) -> Result<ParseValue, Strin
         }
 
         // DateTime types: preserve matched string for Python conversion
-        _ if fmt_type.is_datetime() => Ok(ParseValue::DateTime(s.to_string())),
+        _ if spec.format_type.is_datetime() => Ok(ParseValue::DateTime {
+            raw: s.to_string(),
+            format: spec.format_string.clone(),
+        }),
 
         _ => Ok(ParseValue::Str(s.to_string())),
     }
+}
+
+fn datetime_format_to_regex(format: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = format.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '%' && i + 1 < chars.len() {
+            let token = match chars[i + 1] {
+                'a' => Some("(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)"),
+                'A' => Some("(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)"),
+                'w' => Some("[0-6]"),
+                'd' => Some("[0-9]{1,2}"),
+                'b' => Some("(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"),
+                'B' => Some("(?:January|February|March|April|May|June|July|August|September|October|November|December)"),
+                'm' => Some("[0-9]{1,2}"),
+                'y' => Some("[0-9]{2}"),
+                'Y' => Some("[0-9]{4}"),
+                'H' => Some("[0-9]{1,2}"),
+                'I' => Some("[0-9]{1,2}"),
+                'p' => Some("(?:AM|PM)"),
+                'M' => Some("[0-9]{2}"),
+                'S' => Some("[0-9]{2}"),
+                'f' => Some("[0-9]{1,6}"),
+                'z' => Some("[+|-][0-9]{2}(:?[0-9]{2})?(:?[0-9]{2})?"),
+                'j' => Some("[0-9]{1,3}"),
+                'U' => Some("[0-9]{1,2}"),
+                'W' => Some("[0-9]{1,2}"),
+                _ => None,
+            };
+
+            if let Some(re) = token {
+                result.push_str(re);
+                i += 2;
+                continue;
+            }
+        }
+
+        match chars[i] {
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
+                result.push('\\');
+                result.push(chars[i]);
+            }
+            c => result.push(c),
+        }
+        i += 1;
+    }
+
+    result
 }
 
 /// Parse a decimal integer string, handling sign and base prefixes.
@@ -316,6 +374,14 @@ fn parse_number_with_sep(s: &str) -> Result<ParseValue, String> {
 mod tests {
     use super::*;
 
+    fn spec(format_string: &str, format_type: FormatType) -> FormatSpec {
+        FormatSpec {
+            format_string: format_string.to_string(),
+            format_type,
+            ..FormatSpec::default()
+        }
+    }
+
     #[test]
     fn test_format_type_from_str() {
         assert_eq!(FormatType::from_str("d"), Some(FormatType::Decimal));
@@ -327,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_convert_decimal() {
-        match convert_value("42", &FormatType::Decimal) {
+        match convert_value("42", &spec("d", FormatType::Decimal)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, 42),
             other => panic!("Expected Int(42), got {:?}", other),
         }
@@ -335,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_convert_negative_decimal() {
-        match convert_value("-17", &FormatType::Decimal) {
+        match convert_value("-17", &spec("d", FormatType::Decimal)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, -17),
             other => panic!("Expected Int(-17), got {:?}", other),
         }
@@ -343,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_convert_hex() {
-        match convert_value("0xFF", &FormatType::Hex) {
+        match convert_value("0xFF", &spec("x", FormatType::Hex)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, 255),
             other => panic!("Expected Int(255), got {:?}", other),
         }
@@ -351,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_convert_binary() {
-        match convert_value("0b1010", &FormatType::Binary) {
+        match convert_value("0b1010", &spec("b", FormatType::Binary)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, 10),
             other => panic!("Expected Int(10), got {:?}", other),
         }
@@ -359,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_convert_octal() {
-        match convert_value("0o77", &FormatType::Octal) {
+        match convert_value("0o77", &spec("o", FormatType::Octal)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, 63),
             other => panic!("Expected Int(63), got {:?}", other),
         }
@@ -367,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_convert_float() {
-        match convert_value("3.14", &FormatType::Float) {
+        match convert_value("3.14", &spec("f", FormatType::Float)) {
             Ok(ParseValue::Float(v)) => assert!((v - 3.14).abs() < 1e-10),
             other => panic!("Expected Float(3.14), got {:?}", other),
         }
@@ -375,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_convert_percentage() {
-        match convert_value("50%", &FormatType::Percentage) {
+        match convert_value("50%", &spec("%", FormatType::Percentage)) {
             Ok(ParseValue::Percent(v)) => assert!((v - 0.5).abs() < 1e-10),
             other => panic!("Expected Percent(0.5), got {:?}", other),
         }
@@ -383,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_convert_number_with_sep() {
-        match convert_value("1,000,000", &FormatType::NumberWithSeparator) {
+        match convert_value("1,000,000", &spec("n", FormatType::NumberWithSeparator)) {
             Ok(ParseValue::Int(v)) => assert_eq!(v, 1_000_000),
             other => panic!("Expected Int(1000000), got {:?}", other),
         }
@@ -391,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_convert_string_types() {
-        match convert_value("hello", &FormatType::Word) {
+        match convert_value("hello", &spec("w", FormatType::Word)) {
             Ok(ParseValue::Str(v)) => assert_eq!(v, "hello"),
             other => panic!("Expected Str(hello), got {:?}", other),
         }
@@ -410,5 +476,12 @@ mod tests {
         assert!(FormatType::DateTimeISO.is_datetime());
         assert!(FormatType::TimeOnly.is_datetime());
         assert!(!FormatType::Decimal.is_datetime());
+    }
+
+    #[test]
+    fn test_custom_datetime_regex() {
+        let (regex, groups) = FormatType::CustomDateTime("%Y-%m-%d".to_string()).regex_pattern();
+        assert_eq!(groups, 0);
+        assert_eq!(regex, "[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}");
     }
 }

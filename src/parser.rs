@@ -142,7 +142,7 @@ impl Parser {
     /// Some(ParseResult) on success, None if no match.
     pub fn parse(&self, input: &str) -> Option<ParseResult> {
         let captures = self.match_re.captures(input)?;
-        Some(self.evaluate_captures(&captures, input))
+        self.evaluate_captures(&captures, input)
     }
 
     /// Search for the format pattern anywhere in the string.
@@ -175,7 +175,7 @@ impl Parser {
         };
 
         let captures = self.search_re.captures(search_str)?;
-        Some(self.evaluate_captures(&captures, search_str))
+        self.evaluate_captures(&captures, search_str)
     }
 
     /// Find all matches of the format pattern in the string.
@@ -205,7 +205,7 @@ impl Parser {
 
         self.search_re
             .captures_iter(search_str)
-            .map(|caps| self.evaluate_captures(&caps, search_str))
+            .filter_map(|caps| self.evaluate_captures(&caps, search_str))
             .collect()
     }
 
@@ -220,17 +220,13 @@ impl Parser {
         &self,
         captures: &regex::Captures<'_>,
         _input: &str,
-    ) -> ParseResult {
+    ) -> Option<ParseResult> {
         let mut result = ParseResult::new();
 
         for field in &self.compiled.fields {
             // Try to get the match by iterating capture groups
             let value_str = if field.is_named {
-                let group_name = self
-                    .compiled
-                    .field_to_group
-                    .get(&field.name)
-                    .unwrap_or(&field.name);
+                let group_name = field.group_name.as_ref().unwrap_or(&field.name);
                 captures
                     .name(group_name)
                     .map(|m| m.as_str().to_string())
@@ -241,16 +237,12 @@ impl Parser {
 
             if let Some(val_str) = value_str {
                 // Apply type conversion
-                let value = convert_value(&val_str, &field.format_type)
+                let value = convert_value(&val_str, &field.spec)
                     .unwrap_or(ParseValue::Str(val_str.clone()));
 
                 // Record span if available
                 let span_match = if field.is_named {
-                    let group_name = self
-                        .compiled
-                        .field_to_group
-                        .get(&field.name)
-                        .unwrap_or(&field.name);
+                    let group_name = field.group_name.as_ref().unwrap_or(&field.name);
                     captures.name(group_name)
                 } else {
                     None
@@ -261,7 +253,15 @@ impl Parser {
                     result.spans.insert(span_key, (m.start(), m.end()));
                 }
 
-                if field.is_named {
+                if let Some(repeated_name) = &field.repeated_of {
+                    if let Some(existing) = result.named.get(repeated_name) {
+                        if !parse_values_equal(existing, &value) {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                } else if field.is_named {
                     result.named.insert(field.name.clone(), value);
                 } else {
                     result.fixed.push(value);
@@ -269,7 +269,7 @@ impl Parser {
             }
         }
 
-        result
+        Some(result)
     }
 
     /// Get the matched string for a positional (unnamed) capture group.
@@ -301,6 +301,20 @@ impl Parser {
         }
 
         None
+    }
+}
+
+fn parse_values_equal(left: &ParseValue, right: &ParseValue) -> bool {
+    match (left, right) {
+        (ParseValue::Str(a), ParseValue::Str(b)) => a == b,
+        (ParseValue::Int(a), ParseValue::Int(b)) => a == b,
+        (ParseValue::Float(a), ParseValue::Float(b)) => a == b,
+        (ParseValue::Percent(a), ParseValue::Percent(b)) => a == b,
+        (
+            ParseValue::DateTime { raw: a, format: af },
+            ParseValue::DateTime { raw: b, format: bf },
+        ) => a == b && af == bf,
+        _ => false,
     }
 }
 
