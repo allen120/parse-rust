@@ -3,7 +3,8 @@
 This document summarizes the compatibility patches applied so far:
 
 - `71d6307` - `Improve P0 compatibility gaps`
-- Pending P1 follow-up in the current worktree
+- `62f7514` - `Implement P1 compatibility semantics`
+- Pending P2 follow-up in the current worktree
 
 ## Scope
 
@@ -140,12 +141,52 @@ Validated after the P1 patch:
 - `python -m pytest -q tests` passed with `36 passed`
 - A focused P1 comparison set covering alignment, width, precision, `spans`, and nested fields matched `parse-original` in `11 / 11` cases
 
+## P2 Changes By File
+
+### `src/lib.rs`
+
+- Added `PyMatch` at [lib.rs](/mnt/d/openproject/parse-rust/src/lib.rs:66) to expose `evaluate_result()` for deferred result evaluation.
+- Added `compat_module()` at [lib.rs](/mnt/d/openproject/parse-rust/src/lib.rs:78) to load the embedded Python compatibility layer from `python_compat.py`.
+- Extended `PyParser.parse/search/findall` at [lib.rs](/mnt/d/openproject/parse-rust/src/lib.rs:123) to support `evaluate_result=...` and return `Match` wrappers when requested.
+- Extended top-level `parse/search/findall/compile` at [lib.rs](/mnt/d/openproject/parse-rust/src/lib.rs:257) to accept `extra_types` and delegate those cases to the compatibility layer.
+- Exposed `with_pattern` on the Python module at [lib.rs](/mnt/d/openproject/parse-rust/src/lib.rs:416).
+
+Reason: these API features are required for parity with `parse-original`, but are orthogonal to the Rust fast path and are cheaper to preserve through a focused Python fallback.
+
+### `python_compat.py`
+
+- Added a minimal compatibility parser at [python_compat.py](/mnt/d/openproject/parse-rust/python_compat.py:1) covering:
+  - `with_pattern`,
+  - `extra_types`,
+  - `evaluate_result`,
+  - regex group-count handling for user-defined converters,
+  - Python-side `Parser`, `Result`, `Match`, and `ResultIterator`.
+
+Reason: `parse-original` semantics for custom converters and deferred evaluation are API-heavy. Reusing a compact Python implementation avoids pushing complexity into the Rust matcher where it would add risk for the hot path.
+
+### `tests/test_integration.py`
+
+- Added `evaluate_result=False` coverage for top-level `parse/search/findall` and compiled parser methods at [test_integration.py](/mnt/d/openproject/parse-rust/tests/test_integration.py:347).
+- Added `with_pattern` and `regex_group_count` compatibility tests at [test_integration.py](/mnt/d/openproject/parse-rust/tests/test_integration.py:381).
+- Added `extra_types` override coverage for both `parse()` and `compile()` at [test_integration.py](/mnt/d/openproject/parse-rust/tests/test_integration.py:429).
+
+Reason: these were the remaining uncovered differences from the side-by-side compatibility review.
+
+## P2 Result
+
+Validated after the P2 patch:
+
+- `cargo test --quiet` passed
+- `maturin build --release` passed
+- `PYTHONPATH=/mnt/d/openproject/.pydeps python3 -m pytest -q tests` passed with `44 passed`
+- Focused side-by-side verification against `parse-original` matched for:
+  - `parse(..., evaluate_result=False)`
+  - `search(..., evaluate_result=False)`
+  - `findall(..., evaluate_result=False)`
+  - `with_pattern`
+  - `extra_types` overriding built-ins
+  - `regex_group_count` behavior for nested custom converters
+
 ## Remaining Work
 
-Still not addressed:
-
-- `extra_types`
-- `with_pattern`
-- `evaluate_result`
-
-These remain later compatibility work.
+No open items remain from the original P0/P1/P2 compatibility checklist. Any next work should be either broader upstream test import or performance-focused cleanup of the Python fallback path.

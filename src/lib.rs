@@ -48,9 +48,10 @@ pub mod result;
 pub mod types;
 
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyList, PyType};
 use crate::parser::Parser;
 use crate::result::PyParseResult;
+use std::ffi::CString;
 
 /// Python-exposed compiled parser, equivalent to `parse.compile()`.
 ///
@@ -60,6 +61,30 @@ use crate::result::PyParseResult;
 #[pyclass(name = "Parser")]
 struct PyParser {
     inner: Parser,
+}
+
+#[pyclass(name = "Match")]
+struct PyMatch {
+    result: PyObject,
+}
+
+#[pymethods]
+impl PyMatch {
+    fn evaluate_result(&self, py: Python<'_>) -> PyObject {
+        self.result.clone_ref(py)
+    }
+}
+
+fn compat_module<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
+    let code = CString::new(include_str!("../python_compat.py")).unwrap();
+    let filename = CString::new("parse_rust/python_compat.py").unwrap();
+    let modulename = CString::new("_parse_rust_compat").unwrap();
+    PyModule::from_code(
+        py,
+        code.as_c_str(),
+        filename.as_c_str(),
+        modulename.as_c_str(),
+    )
 }
 
 fn map_compile_error(py: Python<'_>, err: String) -> PyErr {
@@ -95,11 +120,19 @@ impl PyParser {
     ///
     /// Returns:
     ///     Result object on match, None otherwise.
-    #[pyo3(signature = (string))]
-    fn parse(&self, string: &str) -> Option<PyParseResult> {
-        self.inner
+    #[pyo3(signature = (string, evaluate_result=true))]
+    fn parse(&self, py: Python<'_>, string: &str, evaluate_result: Option<bool>) -> PyResult<Option<PyObject>> {
+        let result = self.inner
             .parse(string)
-            .map(|r| PyParseResult { inner: r })
+            .map(|r| PyParseResult { inner: r });
+        if evaluate_result.unwrap_or(true) {
+            Ok(result.map(|r| Py::new(py, r).unwrap().into_bound(py).into_any().unbind()))
+        } else {
+            Ok(result.map(|r| {
+                let res = Py::new(py, r).unwrap().into_bound(py).into_any().unbind();
+                Py::new(py, PyMatch { result: res }).unwrap().into_bound(py).into_any().unbind()
+            }))
+        }
     }
 
     /// Search for the format pattern anywhere in the string.
@@ -111,16 +144,26 @@ impl PyParser {
     ///
     /// Returns:
     ///     Result object on match, None otherwise.
-    #[pyo3(signature = (string, pos=0, endpos=None))]
+    #[pyo3(signature = (string, pos=0, endpos=None, evaluate_result=true))]
     fn search(
         &self,
+        py: Python<'_>,
         string: &str,
         pos: usize,
         endpos: Option<usize>,
-    ) -> Option<PyParseResult> {
-        self.inner
+        evaluate_result: Option<bool>,
+    ) -> PyResult<Option<PyObject>> {
+        let result = self.inner
             .search(string, pos, endpos)
-            .map(|r| PyParseResult { inner: r })
+            .map(|r| PyParseResult { inner: r });
+        if evaluate_result.unwrap_or(true) {
+            Ok(result.map(|r| Py::new(py, r).unwrap().into_bound(py).into_any().unbind()))
+        } else {
+            Ok(result.map(|r| {
+                let res = Py::new(py, r).unwrap().into_bound(py).into_any().unbind();
+                Py::new(py, PyMatch { result: res }).unwrap().into_bound(py).into_any().unbind()
+            }))
+        }
     }
 
     /// Find all matches of the format pattern in the string.
@@ -132,18 +175,28 @@ impl PyParser {
     ///
     /// Returns:
     ///     List of Result objects.
-    #[pyo3(signature = (string, pos=0, endpos=None))]
+    #[pyo3(signature = (string, pos=0, endpos=None, evaluate_result=true))]
     fn findall(
         &self,
+        py: Python<'_>,
         string: &str,
         pos: usize,
         endpos: Option<usize>,
-    ) -> Vec<PyParseResult> {
-        self.inner
+        evaluate_result: bool,
+    ) -> PyResult<PyObject> {
+        let items: Vec<PyObject> = self.inner
             .findall(string, pos, endpos)
             .into_iter()
-            .map(|r| PyParseResult { inner: r })
-            .collect()
+            .map(|r| {
+                let res = Py::new(py, PyParseResult { inner: r }).unwrap().into_bound(py).into_any().unbind();
+                if evaluate_result {
+                    res
+                } else {
+                    Py::new(py, PyMatch { result: res }).unwrap().into_bound(py).into_any().unbind()
+                }
+            })
+            .collect();
+        Ok(PyList::new(py, &items)?.into_any().unbind())
     }
 
     /// Get the original format string.
@@ -201,10 +254,40 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ///     >>> parse("{name:w} is {:d}", "Alice is 30")
     ///     <Result (30,) {name: 'Alice'}>
     #[pyfn(m)]
-    #[pyo3(signature = (format, string, case_sensitive=false))]
-    fn parse(py: Python<'_>, format: &str, string: &str, case_sensitive: bool) -> PyResult<Option<PyParseResult>> {
+    #[pyo3(signature = (format, string, extra_types=None, evaluate_result=true, case_sensitive=false))]
+    fn parse(
+        py: Python<'_>,
+        format: &str,
+        string: &str,
+        extra_types: Option<PyObject>,
+        evaluate_result: bool,
+        case_sensitive: bool,
+    ) -> PyResult<PyObject> {
+        if extra_types.is_some() {
+            return compat_module(py)?
+                .getattr("parse")?
+                .call1((format, string, extra_types, evaluate_result, case_sensitive))
+                .map(|obj| obj.into_any().unbind());
+        }
+
         match crate::parser::Parser::new(format, case_sensitive) {
-            Ok(parser) => Ok(parser.parse(string).map(|r| PyParseResult { inner: r })),
+            Ok(parser) => {
+                let parsed = parser.parse(string).map(|r| PyParseResult { inner: r });
+                if evaluate_result {
+                    Ok(match parsed {
+                        Some(r) => Py::new(py, r)?.into_bound(py).into_any().unbind(),
+                        None => py.None(),
+                    })
+                } else {
+                    Ok(match parsed {
+                        Some(r) => {
+                            let res = Py::new(py, r)?.into_bound(py).into_any().unbind();
+                            Py::new(py, PyMatch { result: res })?.into_bound(py).into_any().unbind()
+                        }
+                        None => py.None(),
+                    })
+                }
+            }
             Err(err) => Err(map_compile_error(py, err)),
         }
     }
@@ -224,17 +307,32 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     /// Returns:
     ///     Result object on match, None otherwise.
     #[pyfn(m)]
-    #[pyo3(signature = (format, string, pos=0, endpos=None, case_sensitive=false))]
+    #[pyo3(signature = (format, string, pos=0, endpos=None, extra_types=None, evaluate_result=true, case_sensitive=false))]
     fn search(
+        py: Python<'_>,
         format: &str,
         string: &str,
         pos: usize,
         endpos: Option<usize>,
+        extra_types: Option<PyObject>,
+        evaluate_result: bool,
         case_sensitive: bool,
-    ) -> Option<PyParseResult> {
-        let parser = crate::parser::Parser::new(format, case_sensitive).ok()?;
-        parser.search(string, pos, endpos)
-            .map(|r| PyParseResult { inner: r })
+    ) -> PyResult<PyObject> {
+        if extra_types.is_some() || !evaluate_result {
+            return compat_module(py)?
+                .getattr("search")?
+                .call1((format, string, pos, endpos, extra_types, evaluate_result, case_sensitive))
+                .map(|obj| obj.into_any().unbind());
+        }
+
+        let parser = match crate::parser::Parser::new(format, case_sensitive) {
+            Ok(parser) => parser,
+            Err(err) => return Err(map_compile_error(py, err)),
+        };
+        Ok(match parser.search(string, pos, endpos).map(|r| PyParseResult { inner: r }) {
+            Some(r) => Py::new(py, r)?.into_bound(py).into_any().unbind(),
+            None => py.None(),
+        })
     }
 
     /// Find all matches of a format pattern in a string.
@@ -251,20 +349,33 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     /// Returns:
     ///     List of Result objects.
     #[pyfn(m)]
-    #[pyo3(signature = (format, string, pos=0, endpos=None, case_sensitive=false))]
+    #[pyo3(signature = (format, string, pos=0, endpos=None, extra_types=None, evaluate_result=true, case_sensitive=false))]
     fn findall(
+        py: Python<'_>,
         format: &str,
         string: &str,
         pos: usize,
         endpos: Option<usize>,
+        extra_types: Option<PyObject>,
+        evaluate_result: bool,
         case_sensitive: bool,
-    ) -> Vec<PyParseResult> {
+    ) -> PyResult<PyObject> {
+        if extra_types.is_some() || !evaluate_result {
+            return compat_module(py)?
+                .getattr("findall")?
+                .call1((format, string, pos, endpos, extra_types, evaluate_result, case_sensitive))
+                .map(|obj| obj.into_any().unbind());
+        }
+
         match crate::parser::Parser::new(format, case_sensitive) {
-            Ok(parser) => parser.findall(string, pos, endpos)
-                .into_iter()
-                .map(|r| PyParseResult { inner: r })
-                .collect(),
-            Err(_) => Vec::new(),
+            Ok(parser) => {
+                let items: Vec<PyObject> = parser.findall(string, pos, endpos)
+                    .into_iter()
+                    .map(|r| Py::new(py, PyParseResult { inner: r }).unwrap().into_bound(py).into_any().unbind())
+                    .collect();
+                Ok(PyList::new(py, &items)?.into_any().unbind())
+            }
+            Err(err) => Err(map_compile_error(py, err)),
         }
     }
 
@@ -287,13 +398,24 @@ fn parse_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ///     >>> p.parse("User Bob")
     ///     <Result () {name: 'Bob'}>
     #[pyfn(m)]
-    #[pyo3(signature = (format, case_sensitive=false))]
-    fn compile(py: Python<'_>, format: &str, case_sensitive: bool) -> PyResult<PyParser> {
-        PyParser::new(py, format, case_sensitive)
+    #[pyo3(signature = (format, extra_types=None, case_sensitive=false))]
+    fn compile(py: Python<'_>, format: &str, extra_types: Option<PyObject>, case_sensitive: bool) -> PyResult<PyObject> {
+        if extra_types.is_some() {
+            return compat_module(py)?
+                .getattr("compile")?
+                .call1((format, extra_types, case_sensitive))
+                .map(|obj| obj.into_any().unbind());
+        }
+        Ok(Py::new(py, PyParser::new(py, format, case_sensitive)?)?.into_bound(py).into_any().unbind())
     }
 
     m.add_class::<PyParser>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyMatch>()?;
+    m.add(
+        "with_pattern",
+        compat_module(m.py())?.getattr("with_pattern")?,
+    )?;
     let repeated = m.py().get_type::<pyo3::exceptions::PyValueError>();
     m.add("RepeatedNameError", repeated)?;
     m.add("__version__", "0.1.0")?;

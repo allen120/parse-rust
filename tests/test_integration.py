@@ -4,6 +4,8 @@ Integration tests for parse_rust Python bindings.
 Ensures API compatibility with the original Python parse library.
 """
 
+import pytest
+
 
 def test_basic_anonymous():
     """Test basic anonymous (positional) field parsing."""
@@ -340,6 +342,106 @@ def test_nested_named_fields_expand_to_dicts():
     assert r.named["hello"]["world"] == "a"
     assert r.named["hello"]["foo"]["baz"] == "b"
     assert r.named["simple"] == "c"
+
+
+def test_parse_evaluate_result_false_returns_match():
+    from parse_rust import parse
+
+    match = parse("hello {}", "hello world", evaluate_result=False)
+    assert match is not None
+    assert match.evaluate_result().fixed == ("world",)
+
+
+def test_search_evaluate_result_false_returns_match():
+    from parse_rust import search
+
+    match = search(
+        "age: {:d}\n",
+        "name: Rufus\nage: 42\ncolor: red\n",
+        evaluate_result=False,
+    )
+    assert match is not None
+    assert match.evaluate_result().fixed == (42,)
+
+
+def test_findall_evaluate_result_false_returns_match_iterable():
+    from parse_rust import findall
+
+    matches = findall(">{}<", "<p>some <b>bold</b> text</p>", evaluate_result=False)
+    assert "".join(m.evaluate_result().fixed[0] for m in matches) == "some bold text"
+
+
+def test_compiled_parser_evaluate_result_false_returns_match():
+    from parse_rust import compile
+
+    parser = compile("hello {}")
+    match = parser.parse("hello world", evaluate_result=False)
+    assert match is not None
+    assert match.evaluate_result().fixed == ("world",)
+
+
+def test_with_pattern_custom_type():
+    from parse_rust import compile, with_pattern
+
+    @with_pattern(r"[ab]")
+    def ab(text):
+        return {"a": 1, "b": 2}[text]
+
+    parser = compile("test {result:ab}", extra_types={"ab": ab})
+    assert parser.parse("test a")["result"] == 1
+    assert parser.parse("test b")["result"] == 2
+    assert parser.parse("test c") is None
+
+
+def test_with_pattern_regex_group_count_for_unnamed_followed_by_field():
+    from parse_rust import compile, with_pattern
+
+    @with_pattern(r"(meter|kilometer)", regex_group_count=1)
+    def parse_unit(text):
+        return text.strip()
+
+    @with_pattern(r"\d+")
+    def parse_number(text):
+        return int(text)
+
+    parser = compile(
+        "test {:Unit}-{:Number}",
+        extra_types={"Unit": parse_unit, "Number": parse_number},
+    )
+    assert parser.parse("test meter-10").fixed == ("meter", 10)
+    assert parser.parse("test kilometer-20").fixed == ("kilometer", 20)
+    assert parser.parse("test liter-30") is None
+
+
+def test_with_pattern_bad_regex_group_count_raises():
+    from parse_rust import compile, with_pattern
+
+    @with_pattern(r"(meter|kilometer)", regex_group_count=1)
+    def parse_unit(text):
+        return text.strip()
+
+    @with_pattern(r"\d+")
+    def parse_number(text):
+        return int(text)
+
+    for bad_group_count, error_type in ((None, ValueError), (0, ValueError), (2, IndexError)):
+        parse_unit.regex_group_count = bad_group_count
+        parser = compile(
+            "test {:Unit}-{:Number}",
+            extra_types={"Unit": parse_unit, "Number": parse_number},
+        )
+        with pytest.raises(error_type):
+            parser.parse("test meter-10")
+
+
+def test_extra_types_override_builtin_and_compile_path():
+    from parse_rust import compile, parse
+
+    doubler = lambda text: int(text) * 2
+
+    assert parse("{:d}", "12", extra_types={"d": doubler}).fixed == (24,)
+    parser = compile("{:d}", extra_types={"d": doubler})
+    assert parser.parse("12").fixed == (24,)
 
 
 if __name__ == "__main__":
