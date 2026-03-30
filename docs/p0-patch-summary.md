@@ -4,7 +4,7 @@ This document summarizes the compatibility patches applied so far:
 
 - `71d6307` - `Improve P0 compatibility gaps`
 - `62f7514` - `Implement P1 compatibility semantics`
-- Pending P2 follow-up in the current worktree
+- `31a4eeb` - `Implement P2 compatibility helpers`
 
 ## Scope
 
