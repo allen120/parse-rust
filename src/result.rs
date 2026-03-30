@@ -18,16 +18,17 @@ pub struct ParseResult {
     pub fixed: Vec<ParseValue>,
     /// Named captured values, keyed by field name.
     pub named: HashMap<String, ParseValue>,
-    /// Span (start, end) positions for each captured field.
-    /// Keys are field names (String) or indices (as string).
-    pub spans: HashMap<String, (usize, usize)>,
+    /// Span (start, end) positions for positional captures.
+    pub fixed_spans: Vec<(usize, usize)>,
+    /// Span (start, end) positions for named captures keyed by original field name.
+    pub named_spans: HashMap<String, (usize, usize)>,
 }
 
 /// A parsed value that can be one of several types.
 ///
 /// This enum represents the possible types that a format specifier
 /// can produce after type conversion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParseValue {
     /// A string value (default, or from :s, :l, :w, :W, :S, :D specifiers).
     Str(String),
@@ -39,6 +40,8 @@ pub enum ParseValue {
     DateTime { raw: String, format: String },
     /// A percentage value (from :% specifier), stored as float (already divided by 100).
     Percent(f64),
+    /// A nested mapping value used for bracket-style fields like `foo[bar]`.
+    Map(HashMap<String, ParseValue>),
 }
 
 impl ParseValue {
@@ -54,6 +57,13 @@ impl ParseValue {
                 })
             }
             ParseValue::Percent(f) => f.into_pyobject(py).unwrap().into_any().unbind(),
+            ParseValue::Map(items) => {
+                let dict = PyDict::new(py);
+                for (key, value) in items {
+                    dict.set_item(key, value.to_pyobject(py)).unwrap();
+                }
+                dict.into_any().unbind()
+            }
         }
     }
 }
@@ -145,7 +155,8 @@ impl ParseResult {
         Self {
             fixed: Vec::new(),
             named: HashMap::new(),
-            spans: HashMap::new(),
+            fixed_spans: Vec::new(),
+            named_spans: HashMap::new(),
         }
     }
 
@@ -159,9 +170,12 @@ impl ParseResult {
         self.named.get(name)
     }
 
-    /// Get the span of a field by its key (name or index as string).
-    pub fn get_span(&self, key: &str) -> Option<(usize, usize)> {
-        self.spans.get(key).copied()
+    pub fn get_fixed_span(&self, index: usize) -> Option<(usize, usize)> {
+        self.fixed_spans.get(index).copied()
+    }
+
+    pub fn get_named_span(&self, key: &str) -> Option<(usize, usize)> {
+        self.named_spans.get(key).copied()
     }
 }
 
@@ -255,7 +269,11 @@ impl PyParseResult {
     #[getter]
     fn spans(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
-        for (key, (start, end)) in &self.inner.spans {
+        for (index, (start, end)) in self.inner.fixed_spans.iter().enumerate() {
+            let span_tuple = PyTuple::new(py, &[*start, *end])?;
+            dict.set_item(index, span_tuple)?;
+        }
+        for (key, (start, end)) in &self.inner.named_spans {
             let span_tuple = PyTuple::new(py, &[*start, *end])?;
             dict.set_item(key, span_tuple)?;
         }

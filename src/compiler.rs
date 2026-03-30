@@ -298,13 +298,11 @@ impl FormatCompiler {
                 };
                 self.fields.push(field_info);
 
-                let (mut type_pattern, extra_groups) = spec.format_type.regex_pattern();
-                if spec.format_type.is_numeric() {
-                    type_pattern = format!("[-+ ]?{}", type_pattern);
-                }
+                let (type_pattern, extra_groups) =
+                    build_field_pattern(&spec, Some(repeated_group.as_str()));
 
                 self.group_index += 1 + extra_groups;
-                return Ok(format!("(?P<{}>{})", repeated_group, type_pattern));
+                return Ok(type_pattern);
             }
             let gn = self.to_group_name(&name);
             self.name_types.insert(name.clone(), spec_text);
@@ -333,18 +331,7 @@ impl FormatCompiler {
         self.fields.push(field_info);
 
         // Get the regex pattern for this type
-        let (mut type_pattern, extra_groups) = spec.format_type.regex_pattern();
-
-        if spec.format_type.is_numeric() {
-            type_pattern = format!("[-+ ]?{}", type_pattern);
-        }
-
-        // Build the capture group pattern
-        let pattern = if let Some(ref gn) = group_name {
-            format!("(?P<{}>{})", gn, type_pattern)
-        } else {
-            format!("({})", type_pattern)
-        };
+        let (pattern, extra_groups) = build_field_pattern(&spec, group_name.as_deref());
 
         self.group_index += 1 + extra_groups;
 
@@ -375,6 +362,86 @@ impl FormatCompiler {
         self.used_group_names
             .insert(group_name.clone(), field_name.to_string());
         group_name
+    }
+}
+
+fn build_field_pattern(spec: &FormatSpec, group_name: Option<&str>) -> (String, usize) {
+    let fmt_type = &spec.format_type;
+    let is_numeric = fmt_type.is_numeric();
+    let (mut core_pattern, extra_groups) = match fmt_type {
+        FormatType::Default => {
+            if let Some(precision) = spec.precision {
+                if let Some(width) = spec.width {
+                    (format!(".{{{},{}}}?", width, precision), 0)
+                } else {
+                    (format!(".{{1,{}}}?", precision), 0)
+                }
+            } else if let Some(width) = spec.width {
+                (format!(".{{{},}}?", width), 0)
+            } else {
+                (".+?".to_string(), 0)
+            }
+        }
+        FormatType::Decimal => {
+            let width = if let Some(width) = spec.width {
+                format!("{{1,{}}}", width)
+            } else {
+                "+".to_string()
+            };
+            let grouping = spec.grouping.map(|c| c.to_string()).unwrap_or_default();
+            (
+                format!(
+                    "[0-9{g}]{w}|0[xX][0-9a-fA-F{g}]{w}|0[bB][01{g}]{w}|0[oO][0-7{g}]{w}",
+                    g = grouping,
+                    w = width
+                ),
+                0,
+            )
+        }
+        _ => fmt_type.regex_pattern(),
+    };
+
+    let mut align = spec.align;
+    let mut fill = spec.fill.unwrap_or(' ');
+
+    if is_numeric {
+        if align == Some('=') {
+            if spec.fill.is_none() {
+                fill = '0';
+            }
+            core_pattern = format!("{}*{}", escape_fill(fill), core_pattern);
+        }
+        core_pattern = format!("[-+ ]?{}", core_pattern);
+    }
+
+    if let Some(width) = spec.width {
+        if align.is_none() {
+            let _ = width;
+            align = Some('>');
+        }
+    }
+
+    let escaped_fill = escape_fill(fill);
+    let wrapped = if let Some(group_name) = group_name {
+        format!("(?P<{}>{})", group_name, core_pattern)
+    } else {
+        format!("({})", core_pattern)
+    };
+    let pattern = match align {
+        Some('<') => format!("{}{}*", wrapped, escaped_fill),
+        Some('>') => format!("{}*{}", escaped_fill, wrapped),
+        Some('^') => format!("{}*{}{}*", escaped_fill, wrapped, escaped_fill),
+        _ => wrapped,
+    };
+
+    (pattern, extra_groups)
+}
+
+fn escape_fill(fill: char) -> String {
+    if r".\+?*[](){}^$".contains(fill) {
+        format!("\\{}", fill)
+    } else {
+        fill.to_string()
     }
 }
 

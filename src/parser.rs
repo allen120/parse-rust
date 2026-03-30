@@ -222,39 +222,27 @@ impl Parser {
         _input: &str,
     ) -> Option<ParseResult> {
         let mut result = ParseResult::new();
+        let mut flat_named = HashMap::new();
 
         for field in &self.compiled.fields {
             // Try to get the match by iterating capture groups
-            let value_str = if field.is_named {
+            let value_and_span = if field.is_named {
                 let group_name = field.group_name.as_ref().unwrap_or(&field.name);
                 captures
                     .name(group_name)
-                    .map(|m| m.as_str().to_string())
+                    .map(|m| (m.as_str().to_string(), (m.start(), m.end())))
             } else {
-                // For positional fields, find by scanning groups in order
-                self.get_positional_match(captures, field.index.unwrap_or(0))
+                self.get_positional_capture(captures, field.index.unwrap_or(0))
+                    .map(|m| (m.as_str().to_string(), (m.start(), m.end())))
             };
 
-            if let Some(val_str) = value_str {
+            if let Some((val_str, span)) = value_and_span {
                 // Apply type conversion
                 let value = convert_value(&val_str, &field.spec)
                     .unwrap_or(ParseValue::Str(val_str.clone()));
 
-                // Record span if available
-                let span_match = if field.is_named {
-                    let group_name = field.group_name.as_ref().unwrap_or(&field.name);
-                    captures.name(group_name)
-                } else {
-                    None
-                };
-
-                if let Some(m) = span_match {
-                    let span_key = field.name.clone();
-                    result.spans.insert(span_key, (m.start(), m.end()));
-                }
-
                 if let Some(repeated_name) = &field.repeated_of {
-                    if let Some(existing) = result.named.get(repeated_name) {
+                    if let Some(existing) = flat_named.get(repeated_name) {
                         if !parse_values_equal(existing, &value) {
                             return None;
                         }
@@ -262,13 +250,16 @@ impl Parser {
                         return None;
                     }
                 } else if field.is_named {
-                    result.named.insert(field.name.clone(), value);
+                    result.named_spans.insert(field.name.clone(), span);
+                    flat_named.insert(field.name.clone(), value);
                 } else {
+                    result.fixed_spans.push(span);
                     result.fixed.push(value);
                 }
             }
         }
 
+        result.named = expand_named_fields(flat_named);
         Some(result)
     }
 
@@ -277,18 +268,18 @@ impl Parser {
     /// Positional groups are tracked by their field index, which maps
     /// to regex capture group indices. We scan through the compiled
     /// fields to find the correct capture group for the given index.
-    fn get_positional_match(
+    fn get_positional_capture<'a>(
         &self,
-        captures: &regex::Captures<'_>,
+        captures: &'a regex::Captures<'_>,
         field_index: usize,
-    ) -> Option<String> {
+    ) -> Option<regex::Match<'a>> {
         // Track which capture group corresponds to which field
         let mut group_idx = 1; // Group 0 is the entire match
         let mut current_fixed = 0;
 
         for field in &self.compiled.fields {
             if !field.is_named && current_fixed == field_index {
-                return captures.get(group_idx).map(|m| m.as_str().to_string());
+                return captures.get(group_idx);
             }
 
             // Count capture groups consumed by this field
@@ -310,12 +301,69 @@ fn parse_values_equal(left: &ParseValue, right: &ParseValue) -> bool {
         (ParseValue::Int(a), ParseValue::Int(b)) => a == b,
         (ParseValue::Float(a), ParseValue::Float(b)) => a == b,
         (ParseValue::Percent(a), ParseValue::Percent(b)) => a == b,
+        (ParseValue::Map(a), ParseValue::Map(b)) => a == b,
         (
             ParseValue::DateTime { raw: a, format: af },
             ParseValue::DateTime { raw: b, format: bf },
         ) => a == b && af == bf,
         _ => false,
     }
+}
+
+fn expand_named_fields(named_fields: HashMap<String, ParseValue>) -> HashMap<String, ParseValue> {
+    let mut result = HashMap::new();
+    for (field, value) in named_fields {
+        insert_named_value(&mut result, &field, value);
+    }
+    result
+}
+
+fn insert_named_value(target: &mut HashMap<String, ParseValue>, field: &str, value: ParseValue) {
+    let Some(bracket_pos) = field.find('[') else {
+        target.insert(field.to_string(), value);
+        return;
+    };
+
+    let base = &field[..bracket_pos];
+    let mut subkeys = Vec::new();
+    let mut rest = &field[bracket_pos..];
+    while let Some(stripped) = rest.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            subkeys.push(stripped[..end].to_string());
+            rest = &stripped[end + 1..];
+        } else {
+            target.insert(field.to_string(), value);
+            return;
+        }
+    }
+
+    let entry = target
+        .entry(base.to_string())
+        .or_insert_with(|| ParseValue::Map(HashMap::new()));
+    insert_into_map(entry, &subkeys, value);
+}
+
+fn insert_into_map(target: &mut ParseValue, subkeys: &[String], value: ParseValue) {
+    if subkeys.is_empty() {
+        *target = value;
+        return;
+    }
+
+    let ParseValue::Map(map) = target else {
+        *target = ParseValue::Map(HashMap::new());
+        insert_into_map(target, subkeys, value);
+        return;
+    };
+
+    if subkeys.len() == 1 {
+        map.insert(subkeys[0].clone(), value);
+        return;
+    }
+
+    let child = map
+        .entry(subkeys[0].clone())
+        .or_insert_with(|| ParseValue::Map(HashMap::new()));
+    insert_into_map(child, &subkeys[1..], value);
 }
 
 /// Convenience function: parse a string with a format pattern.

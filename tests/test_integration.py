@@ -283,6 +283,65 @@ def test_custom_datetime_format_returns_date():
     assert r[0] == date(2023, 11, 25)
 
 
+def test_left_alignment_trims_padding():
+    from parse_rust import parse
+
+    r = parse("{:<} world", "hello       world")
+    assert r is not None
+    assert r.fixed == ("hello",)
+
+
+def test_right_alignment_trims_padding():
+    from parse_rust import parse
+
+    r = parse("hello {:>}", "hello       world")
+    assert r is not None
+    assert r.fixed == ("world",)
+
+
+def test_center_alignment_trims_padding():
+    from parse_rust import parse
+
+    r = parse("hello {:^} world", "hello  there     world")
+    assert r is not None
+    assert r.fixed == ("there",)
+
+
+def test_precision_and_width_for_strings():
+    from parse_rust import parse
+
+    assert parse("{:.2}{:.2}", "look").fixed == ("lo", "ok")
+    assert parse("{:2}{:2}", "look").fixed == ("lo", "ok")
+    assert parse("{:4}{:.4}", "look at that").fixed == ("look at ", "that")
+
+
+def test_width_for_numeric_types():
+    from parse_rust import parse
+
+    assert parse("a {:5d} b", "a    12 b")[0] == 12
+    assert parse("a {:8.5f} b", "a  .31415 b")[0] == 0.31415
+    assert parse("{:02d}{:02d}", "0440").fixed == (4, 40)
+
+
+def test_spans_include_fixed_and_named_keys():
+    from parse_rust import parse
+
+    string = "hello world and other beings"
+    r = parse("hello {} {name} {} {spam}", string)
+    assert r is not None
+    assert r.spans == {0: (6, 11), "name": (12, 15), 1: (16, 21), "spam": (22, 28)}
+
+
+def test_nested_named_fields_expand_to_dicts():
+    from parse_rust import parse
+
+    r = parse("{hello[world]}_{hello[foo][baz]}_{simple}", "a_b_c")
+    assert r is not None
+    assert r.named["hello"]["world"] == "a"
+    assert r.named["hello"]["foo"]["baz"] == "b"
+    assert r.named["simple"] == "c"
+
+
 if __name__ == "__main__":
     import sys
 
