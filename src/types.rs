@@ -5,6 +5,8 @@
 
 use crate::compiler::FormatSpec;
 use crate::result::ParseValue;
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 /// All supported format type specifiers.
 ///
@@ -32,7 +34,7 @@ pub enum FormatType {
     NumberWithSeparator,
     /// `f` - Fixed-point float.
     Float,
-    /// `F` - Fixed-point float (Decimal precision, treated as float in Rust).
+    /// `F` - Fixed-point decimal.
     FloatDecimal,
     /// `e` - Scientific notation float.
     Scientific,
@@ -108,56 +110,56 @@ impl FormatType {
     /// in the pattern.
     pub fn regex_pattern(&self) -> (String, usize) {
         match self {
-            FormatType::Default => (".+?".to_string(), 0),
-            FormatType::NonWhitespace => (r"\S+".to_string(), 0),
+            FormatType::Default => (".*?".to_string(), 0),
+            FormatType::NonWhitespace => (r".+".to_string(), 0),
             FormatType::Word => (r"\w+".to_string(), 0),
             FormatType::NonWord => (r"\W+".to_string(), 0),
             FormatType::Letters => ("[A-Za-z]+".to_string(), 0),
-            FormatType::Whitespace => (r"\s+".to_string(), 0),
+            FormatType::Whitespace => (r"\S+".to_string(), 0),
             FormatType::NonDigit => (r"\D+".to_string(), 0),
             FormatType::Decimal => (r"\d+".to_string(), 0),
             FormatType::Binary => (r"(0[bB])?[01]+".to_string(), 1),
             FormatType::Octal => (r"(0[oO])?[0-7]+".to_string(), 1),
             FormatType::Hex => (r"(0[xX])?[0-9a-fA-F]+".to_string(), 1),
-            FormatType::NumberWithSeparator => (r"\d{1,3}([,._]\d{3})*".to_string(), 1),
+            FormatType::NumberWithSeparator => (r"[-+ ]?\d{1,3}([,._]\d{3})*".to_string(), 1),
             FormatType::Float => (r"\d*\.\d+".to_string(), 0),
             FormatType::FloatDecimal => (r"\d*\.\d+".to_string(), 0),
             FormatType::Scientific => (
-                r"\d*\.\d+[eE][-+]?\d+|nan|NAN|inf|INF".to_string(),
+                r"[-+]?(?:\d*\.\d+[eE][-+]?\d+|nan|NAN|inf|INF)".to_string(),
                 0,
             ),
             FormatType::GeneralFloat => (
-                r"\d+(\.\d+)?([eE][-+]?\d+)?|nan|NAN|inf|INF".to_string(),
+                r"[-+]?(?:\d+(\.\d+)?([eE][-+]?\d+)?|nan|NAN|inf|INF)".to_string(),
                 2,
             ),
-            FormatType::Percentage => (r"\d+(\.\d+)?%".to_string(), 1),
+            FormatType::Percentage => (r"[-+]?\d+(\.\d+)?%".to_string(), 1),
             FormatType::DateTimeISO => (
-                r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:?\d\d)?|\d{4}-\d\d-\d\d".to_string(),
-                3,
+                r"\d{4}-\d\d-\d\d(?:[T ]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:\s*(?:Z|[+-]\d\d:?\d\d))?)?".to_string(),
+                0,
             ),
             FormatType::DateTimeEmail => (
-                r"\w{3},?\s+\d\d?\s+\w{3}\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*(\w+|[+-]\d{4})?".to_string(),
-                2,
+                r"(?:\w{3},?\s+)?\d\d?\s+\w{3}\s+\d{4}\s+\d\d:\d\d(?::\d\d)?\s*(?:\w+|[+-]\d\d:?\d\d)?".to_string(),
+                0,
             ),
             FormatType::DateTimeUS => (
-                r"(\d\d?|\w{3})\s+\d\d?\s+\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?".to_string(),
-                4,
+                r"(?:\d\d?|\w+)[/-](?:\d\d?|\w+)[/-]\d{4}(?:\s+\d\d:\d\d(?::\d\d)?\s*(?:[AP]M)?\s*(?:\w+|[+-]\d\d?:?\d\d)?)?".to_string(),
+                0,
             ),
             FormatType::DateTimeGeneric => (
-                r"\d\d?[-/](\d\d?|\w{3})[-/]\d{4}\s+\d\d:\d\d(:\d\d)?\s*([AP]M)?\s*(\w+|[+-]\d{4})?".to_string(),
-                4,
+                r"\d\d?[-/](?:\d\d?|\w+)[-/]\d{4}(?:\s+\d\d:\d\d(?::\d\d)?\s*(?:[AP]M)?\s*(?:\w+|[+-]\d\d?:?\d\d)?)?".to_string(),
+                0,
             ),
             FormatType::DateTimeHTTP => (
-                r"\d\d?[-/]\w{3}[-/]\d{4}:\d\d:\d\d:\d\d\s*(\w+|[+-]\d{4})?".to_string(),
-                1,
+                r"\d\d?/\w+/\d{4}:\d\d:\d\d:\d\d\s*(?:\w+|[+-]\d\d:?\d\d)?".to_string(),
+                0,
             ),
             FormatType::DateTimeCTime => (
                 r"\w{3}\s+\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d\s+\d{4}".to_string(),
                 0,
             ),
             FormatType::TimeOnly => (
-                r"\d{1,2}:\d{1,2}(:\d{1,2}(\.\d+)?)?\s*([AP]M)?\s*(Z|[+-]\d\d:?\d\d)?".to_string(),
-                4,
+                r"\d{1,2}:\d{1,2}(?::\d{1,2}(?:\.\d+)?)?\s*(?:[AP]M)?\s*(?:Z|[+-]\d\d?:?\d\d)?".to_string(),
+                0,
             ),
             FormatType::DateTimeSyslog => (
                 r"\w{3}\s+\d\d?\s+\d\d:\d\d:\d\d".to_string(),
@@ -207,31 +209,33 @@ impl FormatType {
 /// For datetime types, the raw string and format are preserved for Python-side conversion.
 pub fn convert_value(s: &str, spec: &FormatSpec) -> Result<ParseValue, String> {
     match &spec.format_type {
-        FormatType::Default | FormatType::NonWhitespace | FormatType::Word
-        | FormatType::NonWord | FormatType::Letters | FormatType::Whitespace
+        FormatType::Default
+        | FormatType::NonWhitespace
+        | FormatType::Word
+        | FormatType::NonWord
+        | FormatType::Letters
+        | FormatType::Whitespace
         | FormatType::NonDigit => Ok(ParseValue::Str(s.to_string())),
 
-        FormatType::Decimal => parse_decimal(s),
+        FormatType::Decimal => parse_decimal(s, spec),
         FormatType::Binary => parse_int_base(s, 2),
         FormatType::Octal => parse_int_base(s, 8),
         FormatType::Hex => parse_int_base(s, 16),
         FormatType::NumberWithSeparator => parse_number_with_sep(s),
 
-        FormatType::Float | FormatType::FloatDecimal => {
-            s.parse::<f64>()
-                .map(ParseValue::Float)
-                .map_err(|e| format!("Failed to parse float '{}': {}", s, e))
-        }
-        FormatType::Scientific => {
-            s.parse::<f64>()
-                .map(ParseValue::Float)
-                .map_err(|e| format!("Failed to parse scientific '{}': {}", s, e))
-        }
-        FormatType::GeneralFloat => {
-            s.parse::<f64>()
-                .map(ParseValue::Float)
-                .map_err(|e| format!("Failed to parse general float '{}': {}", s, e))
-        }
+        FormatType::Float => s
+            .parse::<f64>()
+            .map(ParseValue::Float)
+            .map_err(|e| format!("Failed to parse float '{}': {}", s, e)),
+        FormatType::FloatDecimal => Ok(ParseValue::Decimal(s.to_string())),
+        FormatType::Scientific => s
+            .parse::<f64>()
+            .map(ParseValue::Float)
+            .map_err(|e| format!("Failed to parse scientific '{}': {}", s, e)),
+        FormatType::GeneralFloat => s
+            .parse::<f64>()
+            .map(ParseValue::Float)
+            .map_err(|e| format!("Failed to parse general float '{}': {}", s, e)),
         FormatType::Percentage => {
             let num_str = s.trim_end_matches('%');
             num_str
@@ -240,15 +244,47 @@ pub fn convert_value(s: &str, spec: &FormatSpec) -> Result<ParseValue, String> {
                 .map_err(|e| format!("Failed to parse percentage '{}': {}", s, e))
         }
 
-        // DateTime types: preserve matched string for Python conversion
         _ if spec.format_type.is_datetime() => Ok(ParseValue::DateTime {
             raw: s.to_string(),
-            format: spec.format_string.clone(),
+            format: spec.type_name.clone(),
         }),
 
         _ => Ok(ParseValue::Str(s.to_string())),
     }
 }
+
+pub fn dt_format_to_regex_map(py: Python<'_>) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    for (k, v) in [
+        ("%a", "(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)"),
+        ("%A", "(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)"),
+        ("%w", "[0-6]"),
+        ("%d", "[0-9]{1,2}"),
+        ("%b", "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"),
+        ("%B", "(?:January|February|March|April|May|June|July|August|September|October|November|December)"),
+        ("%m", "[0-9]{1,2}"),
+        ("%y", "[0-9]{2}"),
+        ("%Y", "[0-9]{4}"),
+        ("%H", "[0-9]{1,2}"),
+        ("%I", "[0-9]{1,2}"),
+        ("%p", "(?:AM|PM)"),
+        ("%M", "[0-9]{2}"),
+        ("%S", "[0-9]{2}"),
+        ("%f", "[0-9]{1,6}"),
+        ("%z", "[+|-][0-9]{2}(:?[0-9]{2})?(:?[0-9]{2})?"),
+        ("%j", "[0-9]{1,3}"),
+        ("%U", "[0-9]{1,2}"),
+        ("%W", "[0-9]{1,2}"),
+    ] {
+        dict.set_item(k, v)?;
+    }
+    Ok(dict.into_any().unbind())
+}
+
+pub fn dt_format_to_regex(format: &str) -> String {
+    datetime_format_to_regex(format)
+}
+
 
 fn datetime_format_to_regex(format: &str) -> String {
     let mut result = String::new();
@@ -306,7 +342,7 @@ fn datetime_format_to_regex(format: &str) -> String {
 /// - Optional sign: +, -, space
 /// - Base prefixes: 0x (hex), 0o (octal), 0b (binary)
 /// - Plain decimal numbers
-fn parse_decimal(s: &str) -> Result<ParseValue, String> {
+fn parse_decimal(s: &str, spec: &FormatSpec) -> Result<ParseValue, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Empty string".to_string());
@@ -318,16 +354,23 @@ fn parse_decimal(s: &str) -> Result<ParseValue, String> {
         _ => (1i64, s),
     };
 
-    // Detect base from prefix
-    let (base, num_str) = if rest.len() > 2 {
-        match &rest[..2] {
-            "0x" | "0X" => (16, &rest[2..]),
-            "0o" | "0O" => (8, &rest[2..]),
-            "0b" | "0B" => (2, &rest[2..]),
-            _ => (10, rest),
+    let normalized = if let Some(grouping) = spec.grouping {
+        rest.replace(grouping, "")
+    } else if spec.align == Some('=') {
+        rest.replace(spec.fill.unwrap_or('0'), "")
+    } else {
+        rest.to_string()
+    };
+
+    let (base, num_str) = if normalized.len() > 2 {
+        match &normalized[..2] {
+            "0x" | "0X" => (16, &normalized[2..]),
+            "0o" | "0O" => (8, &normalized[2..]),
+            "0b" | "0B" => (2, &normalized[2..]),
+            _ => (10, normalized.as_str()),
         }
     } else {
-        (10, rest)
+        (10, normalized.as_str())
     };
 
     i64::from_str_radix(num_str, base)
@@ -363,10 +406,21 @@ fn parse_int_base(s: &str, base: u32) -> Result<ParseValue, String> {
 
 /// Parse a number with thousands separators (commas, dots, underscores).
 fn parse_number_with_sep(s: &str) -> Result<ParseValue, String> {
-    let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty string".to_string());
+    }
+
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'-') => (-1i64, &s[1..]),
+        Some(b'+') | Some(b' ') => (1i64, &s[1..]),
+        _ => (1i64, s),
+    };
+
+    let cleaned: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
     cleaned
         .parse::<i64>()
-        .map(ParseValue::Int)
+        .map(|value| ParseValue::Int(sign * value))
         .map_err(|e| format!("Failed to parse number '{}': {}", s, e))
 }
 
@@ -461,6 +515,34 @@ mod tests {
             Ok(ParseValue::Str(v)) => assert_eq!(v, "hello"),
             other => panic!("Expected Str(hello), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_string_type_regex_semantics() {
+        let (string_regex, string_groups) = FormatType::NonWhitespace.regex_pattern();
+        assert_eq!(string_regex, r".+");
+        assert_eq!(string_groups, 0);
+
+        let (non_space_regex, non_space_groups) = FormatType::Whitespace.regex_pattern();
+        assert_eq!(non_space_regex, r"\S+");
+        assert_eq!(non_space_groups, 0);
+    }
+
+    #[test]
+    fn test_convert_float_decimal_preserves_text() {
+        match convert_value("12.3400", &spec("F", FormatType::FloatDecimal)) {
+            Ok(ParseValue::Decimal(v)) => assert_eq!(v, "12.3400"),
+            other => panic!("Expected Decimal(12.3400), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_datetime_token_regex_helpers() {
+        assert_eq!(dt_format_to_regex("%Y-%m-%d"), "[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}");
+        assert_eq!(
+            dt_format_to_regex("%H:%M:%S"),
+            "[0-9]{1,2}:[0-9]{2}:[0-9]{2}"
+        );
     }
 
     #[test]

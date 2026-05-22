@@ -27,4 +27,4 @@ classifiers = [
 keywords = ["parse", "format", "string", "extract", "rust"]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["extension-module"]

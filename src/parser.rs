@@ -5,48 +5,94 @@
 //! This module ties together the compiler and type system to
 //! deliver the main parse/search/findall functionality.
 
-use crate::compiler::{compile_format, CompiledFormat};
+use crate::compiler::{
+    compile_format, compile_format_with_custom, CompiledFormat, CustomTypePattern, EvaluateError,
+    FieldInfo,
+};
 use crate::result::{ParseResult, ParseValue};
 use crate::types::convert_value;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-/// Global cache for compiled parsers, keyed by (format_string, case_sensitive).
+struct ParserCache {
+    insensitive: HashMap<String, Arc<Parser>>,
+    sensitive: HashMap<String, Arc<Parser>>,
+}
+
+impl ParserCache {
+    fn map(&self, case_sensitive: bool) -> &HashMap<String, Arc<Parser>> {
+        if case_sensitive {
+            &self.sensitive
+        } else {
+            &self.insensitive
+        }
+    }
+
+    fn map_mut(&mut self, case_sensitive: bool) -> &mut HashMap<String, Arc<Parser>> {
+        if case_sensitive {
+            &mut self.sensitive
+        } else {
+            &mut self.insensitive
+        }
+    }
+
+    fn clear_if_full(&mut self) {
+        if self.insensitive.len() + self.sensitive.len() >= MAX_CACHE_SIZE {
+            self.insensitive.clear();
+            self.sensitive.clear();
+        }
+    }
+
+    fn clear_all(&mut self) {
+        self.insensitive.clear();
+        self.sensitive.clear();
+    }
+}
+
+/// Global cache for compiled parsers, keyed by format string within each case mode.
 /// This avoids recompiling the same format string on every call to the
 /// convenience functions (parse, search, findall).
-static PARSER_CACHE: once_cell::sync::Lazy<Mutex<HashMap<(String, bool), std::sync::Arc<Parser>>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PARSER_CACHE: once_cell::sync::Lazy<Mutex<ParserCache>> =
+    once_cell::sync::Lazy::new(|| {
+        Mutex::new(ParserCache {
+            insensitive: HashMap::new(),
+            sensitive: HashMap::new(),
+        })
+    });
 
 /// Maximum number of cached parsers to prevent unbounded memory growth.
 const MAX_CACHE_SIZE: usize = 128;
 
 /// Get or create a cached Parser for the given format string.
-fn get_cached_parser(format: &str, case_sensitive: bool) -> Option<std::sync::Arc<Parser>> {
-    let key = (format.to_string(), case_sensitive);
-
-    // Try to get from cache
+fn get_cached_parser(format: &str, case_sensitive: bool) -> Option<Arc<Parser>> {
     {
         let cache = PARSER_CACHE.lock().ok()?;
-        if let Some(parser) = cache.get(&key) {
-            return Some(parser.clone());
+        if let Some(parser) = cache.map(case_sensitive).get(format) {
+            return Some(Arc::clone(parser));
         }
     }
 
-    // Create new parser
-    let parser = std::sync::Arc::new(Parser::new(format, case_sensitive).ok()?);
+    let parser = Arc::new(Parser::new(format, case_sensitive).ok()?);
 
-    // Insert into cache
-    {
-        if let Ok(mut cache) = PARSER_CACHE.lock() {
-            if cache.len() >= MAX_CACHE_SIZE {
-                cache.clear(); // Simple eviction strategy
-            }
-            cache.insert(key, parser.clone());
+    if let Ok(mut cache) = PARSER_CACHE.lock() {
+        if let Some(existing) = cache.map(case_sensitive).get(format) {
+            return Some(Arc::clone(existing));
         }
+
+        cache.clear_if_full();
+        cache
+            .map_mut(case_sensitive)
+            .insert(format.to_string(), Arc::clone(&parser));
     }
 
     Some(parser)
+}
+
+pub fn clear_cache() {
+    if let Ok(mut cache) = PARSER_CACHE.lock() {
+        cache.clear_all();
+    }
 }
 
 /// A compiled parser that can be reused for multiple parse operations.
@@ -84,15 +130,23 @@ impl Parser {
     /// * `case_sensitive` - Whether matching should be case-sensitive
     pub fn new(format: &str, case_sensitive: bool) -> Result<Self, String> {
         let compiled = compile_format(format, case_sensitive)?;
+        Self::from_compiled(format, compiled)
+    }
 
+    pub fn new_with_custom(
+        format: &str,
+        case_sensitive: bool,
+        custom_types: &HashMap<String, CustomTypePattern>,
+    ) -> Result<Self, String> {
+        let compiled = compile_format_with_custom(format, case_sensitive, custom_types)?;
+        Self::from_compiled(format, compiled)
+    }
+
+    fn from_compiled(format: &str, compiled: CompiledFormat) -> Result<Self, String> {
         // Build anchored regex for exact matching
         let match_pattern = format!("\\A{}\\z", &compiled.pattern);
-        let match_re = Regex::new(&match_pattern).map_err(|e| {
-            format!(
-                "Failed to compile match regex '{}': {}",
-                match_pattern, e
-            )
-        })?;
+        let match_re = Regex::new(&match_pattern)
+            .map_err(|e| format!("Failed to compile match regex '{}': {}", match_pattern, e))?;
 
         // Build unanchored regex for searching
         let search_re = Regex::new(&compiled.pattern).map_err(|e| {
@@ -130,6 +184,10 @@ impl Parser {
         &self.compiled.fixed_fields
     }
 
+    pub(crate) fn fields(&self) -> &[FieldInfo] {
+        &self.compiled.fields
+    }
+
     /// Parse a string for an exact match against the format.
     ///
     /// The entire string must match the format pattern.
@@ -142,7 +200,16 @@ impl Parser {
     /// Some(ParseResult) on success, None if no match.
     pub fn parse(&self, input: &str) -> Option<ParseResult> {
         let captures = self.match_re.captures(input)?;
-        self.evaluate_captures(&captures, input)
+        self.try_evaluate_captures(&captures, input, 0).ok().flatten()
+    }
+
+    pub fn parse_with_error(&self, input: &str) -> Result<Option<ParseResult>, String> {
+        let captures = match self.match_re.captures(input) {
+            Some(captures) => captures,
+            None => return Ok(None),
+        };
+        self.try_evaluate_captures(&captures, input, 0)
+            .map_err(EvaluateError::into_message)
     }
 
     /// Search for the format pattern anywhere in the string.
@@ -157,25 +224,11 @@ impl Parser {
     ///
     /// # Returns
     /// Some(ParseResult) on success, None if no match found.
-    pub fn search(
-        &self,
-        input: &str,
-        pos: usize,
-        endpos: Option<usize>,
-    ) -> Option<ParseResult> {
-        let search_str = match endpos {
-            Some(end) => {
-                if end > input.len() {
-                    &input[pos..]
-                } else {
-                    &input[pos..end]
-                }
-            }
-            None => &input[pos..],
-        };
+    pub fn search(&self, input: &str, pos: usize, endpos: Option<usize>) -> Option<ParseResult> {
+        let (search_str, search_offset) = slice_for_char_range(input, pos, endpos)?;
 
         let captures = self.search_re.captures(search_str)?;
-        self.evaluate_captures(&captures, search_str)
+        self.evaluate_captures(&captures, input, search_offset)
     }
 
     /// Find all matches of the format pattern in the string.
@@ -186,26 +239,14 @@ impl Parser {
     /// * `input` - The string to search
     /// * `pos` - Starting position
     /// * `endpos` - Optional ending position
-    pub fn findall(
-        &self,
-        input: &str,
-        pos: usize,
-        endpos: Option<usize>,
-    ) -> Vec<ParseResult> {
-        let search_str = match endpos {
-            Some(end) => {
-                if end > input.len() {
-                    &input[pos..]
-                } else {
-                    &input[pos..end]
-                }
-            }
-            None => &input[pos..],
+    pub fn findall(&self, input: &str, pos: usize, endpos: Option<usize>) -> Vec<ParseResult> {
+        let Some((search_str, search_offset)) = slice_for_char_range(input, pos, endpos) else {
+            return Vec::new();
         };
 
         self.search_re
             .captures_iter(search_str)
-            .filter_map(|caps| self.evaluate_captures(&caps, search_str))
+            .filter_map(|caps| self.evaluate_captures(&caps, input, search_offset))
             .collect()
     }
 
@@ -216,38 +257,74 @@ impl Parser {
     /// 2. Extract the matched substring for each field
     /// 3. Apply type conversion based on the field's format type
     /// 4. Record span information for each field
-    fn evaluate_captures(
+    fn try_evaluate_captures(
         &self,
         captures: &regex::Captures<'_>,
-        _input: &str,
-    ) -> Option<ParseResult> {
+        input: &str,
+        search_offset: usize,
+    ) -> Result<Option<ParseResult>, EvaluateError> {
         let mut result = ParseResult::new();
         let mut flat_named = HashMap::new();
+        let mut char_index_cache = HashMap::new();
+        char_index_cache.insert(0, 0);
+        char_index_cache.insert(input.len(), input.chars().count());
+
+        let char_index = |byte_index: usize, cache: &mut HashMap<usize, usize>| {
+            if let Some(&index) = cache.get(&byte_index) {
+                return index;
+            }
+
+            let index = byte_to_char_index(input, byte_index);
+            cache.insert(byte_index, index);
+            index
+        };
 
         for field in &self.compiled.fields {
-            // Try to get the match by iterating capture groups
             let value_and_span = if field.is_named {
                 let group_name = field.group_name.as_ref().unwrap_or(&field.name);
-                captures
-                    .name(group_name)
-                    .map(|m| (m.as_str().to_string(), (m.start(), m.end())))
+                captures.name(group_name).map(|m| {
+                    let start = search_offset + m.start();
+                    let end = search_offset + m.end();
+                    (
+                        m.as_str().to_string(),
+                        (
+                            char_index(start, &mut char_index_cache),
+                            char_index(end, &mut char_index_cache),
+                        ),
+                    )
+                })
             } else {
                 self.get_positional_capture(captures, field.index.unwrap_or(0))
-                    .map(|m| (m.as_str().to_string(), (m.start(), m.end())))
+                    .map(|m| {
+                        let start = search_offset + m.start();
+                        let end = search_offset + m.end();
+                        (
+                            m.as_str().to_string(),
+                            (
+                                char_index(start, &mut char_index_cache),
+                                char_index(end, &mut char_index_cache),
+                            ),
+                        )
+                    })
             };
 
             if let Some((val_str, span)) = value_and_span {
-                // Apply type conversion
-                let value = convert_value(&val_str, &field.spec)
-                    .unwrap_or(ParseValue::Str(val_str.clone()));
+                let value = if field.custom_type_name.is_some() {
+                    ParseValue::Str(val_str.clone())
+                } else {
+                    convert_value(&val_str, &field.spec).unwrap_or(ParseValue::Str(val_str.clone()))
+                };
 
                 if let Some(repeated_name) = &field.repeated_of {
                     if let Some(existing) = flat_named.get(repeated_name) {
                         if !parse_values_equal(existing, &value) {
-                            return None;
+                            return Err(EvaluateError::RepeatedNameMismatch(format!(
+                                "RepeatedNameError: field '{}' matched conflicting values",
+                                repeated_name
+                            )));
                         }
                     } else {
-                        return None;
+                        return Ok(None);
                     }
                 } else if field.is_named {
                     result.named_spans.insert(field.name.clone(), span);
@@ -260,7 +337,18 @@ impl Parser {
         }
 
         result.named = expand_named_fields(flat_named);
-        Some(result)
+        Ok(Some(result))
+    }
+
+    fn evaluate_captures(
+        &self,
+        captures: &regex::Captures<'_>,
+        input: &str,
+        search_offset: usize,
+    ) -> Option<ParseResult> {
+        self.try_evaluate_captures(captures, input, search_offset)
+            .ok()
+            .flatten()
     }
 
     /// Get the matched string for a positional (unnamed) capture group.
@@ -273,26 +361,55 @@ impl Parser {
         captures: &'a regex::Captures<'_>,
         field_index: usize,
     ) -> Option<regex::Match<'a>> {
-        // Track which capture group corresponds to which field
-        let mut group_idx = 1; // Group 0 is the entire match
-        let mut current_fixed = 0;
-
-        for field in &self.compiled.fields {
-            if !field.is_named && current_fixed == field_index {
-                return captures.get(group_idx);
-            }
-
-            // Count capture groups consumed by this field
-            let (_, extra_groups) = field.format_type.regex_pattern();
-            group_idx += 1 + extra_groups;
-
-            if !field.is_named {
-                current_fixed += 1;
-            }
-        }
-
-        None
+        let group_idx = *self.compiled.fixed_group_indices.get(field_index)?;
+        captures.get(group_idx)
     }
+}
+
+fn slice_for_char_range(input: &str, pos: usize, endpos: Option<usize>) -> Option<(&str, usize)> {
+    if pos == 0 && endpos.is_none() {
+        return Some((input, 0));
+    }
+
+    let mut char_len = 0;
+    let mut start = None;
+    let mut end = None;
+    let target_end = endpos;
+
+    for (char_index, (byte_index, _)) in input.char_indices().enumerate() {
+        if char_index == pos {
+            start = Some(byte_index);
+        }
+        if target_end == Some(char_index) {
+            end = Some(byte_index);
+            break;
+        }
+        char_len = char_index + 1;
+    }
+
+    let char_len = char_len;
+    let start = match start {
+        Some(start) => start,
+        None if pos == char_len => input.len(),
+        None => return None,
+    };
+
+    let end_char = target_end.unwrap_or(char_len).min(char_len);
+    let end = match end {
+        Some(end) => end,
+        None if end_char == char_len => input.len(),
+        None => return None,
+    };
+
+    if end < start {
+        return None;
+    }
+
+    Some((&input[start..end], start))
+}
+
+fn byte_to_char_index(input: &str, byte_index: usize) -> usize {
+    input[..byte_index].chars().count()
 }
 
 fn parse_values_equal(left: &ParseValue, right: &ParseValue) -> bool {
@@ -300,6 +417,7 @@ fn parse_values_equal(left: &ParseValue, right: &ParseValue) -> bool {
         (ParseValue::Str(a), ParseValue::Str(b)) => a == b,
         (ParseValue::Int(a), ParseValue::Int(b)) => a == b,
         (ParseValue::Float(a), ParseValue::Float(b)) => a == b,
+        (ParseValue::Decimal(a), ParseValue::Decimal(b)) => a == b,
         (ParseValue::Percent(a), ParseValue::Percent(b)) => a == b,
         (ParseValue::Map(a), ParseValue::Map(b)) => a == b,
         (
@@ -366,6 +484,10 @@ fn insert_into_map(target: &mut ParseValue, subkeys: &[String], value: ParseValu
     insert_into_map(child, &subkeys[1..], value);
 }
 
+pub fn cached_parser(format: &str, case_sensitive: bool) -> Option<Arc<Parser>> {
+    get_cached_parser(format, case_sensitive)
+}
+
 /// Convenience function: parse a string with a format pattern.
 ///
 /// This is equivalent to `Parser::new(format).parse(input)` but
@@ -390,9 +512,15 @@ pub fn parse(format: &str, input: &str, case_sensitive: bool) -> Option<ParseRes
 /// * `format` - The format string
 /// * `input` - The string to search
 /// * `case_sensitive` - Whether matching should be case-sensitive
-pub fn search(format: &str, input: &str, case_sensitive: bool) -> Option<ParseResult> {
+pub fn search(
+    format: &str,
+    input: &str,
+    pos: usize,
+    endpos: Option<usize>,
+    case_sensitive: bool,
+) -> Option<ParseResult> {
     let parser = get_cached_parser(format, case_sensitive)?;
-    parser.search(input, 0, None)
+    parser.search(input, pos, endpos)
 }
 
 /// Convenience function: find all matches of a format pattern.
@@ -400,10 +528,18 @@ pub fn search(format: &str, input: &str, case_sensitive: bool) -> Option<ParseRe
 /// # Arguments
 /// * `format` - The format string
 /// * `input` - The string to search
+/// * `pos` - Starting position
+/// * `endpos` - Optional ending position
 /// * `case_sensitive` - Whether matching should be case-sensitive
-pub fn findall(format: &str, input: &str, case_sensitive: bool) -> Vec<ParseResult> {
+pub fn findall(
+    format: &str,
+    input: &str,
+    pos: usize,
+    endpos: Option<usize>,
+    case_sensitive: bool,
+) -> Vec<ParseResult> {
     match get_cached_parser(format, case_sensitive) {
-        Some(parser) => parser.findall(input, 0, None),
+        Some(parser) => parser.findall(input, pos, endpos),
         None => Vec::new(),
     }
 }
@@ -411,6 +547,36 @@ pub fn findall(format: &str, input: &str, case_sensitive: bool) -> Vec<ParseResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_values_equal_datetime_considers_raw_and_format() {
+        let base = ParseValue::DateTime {
+            raw: "1997-07-16T19:20Z".to_string(),
+            format: "ti".to_string(),
+        };
+        let same = ParseValue::DateTime {
+            raw: "1997-07-16T19:20Z".to_string(),
+            format: "ti".to_string(),
+        };
+        let different_raw = ParseValue::DateTime {
+            raw: "1997-07-16T19:21Z".to_string(),
+            format: "ti".to_string(),
+        };
+        let different_format = ParseValue::DateTime {
+            raw: "1997-07-16T19:20Z".to_string(),
+            format: "te".to_string(),
+        };
+
+        assert!(parse_values_equal(&base, &same));
+        assert!(!parse_values_equal(&base, &different_raw));
+        assert!(!parse_values_equal(&base, &different_format));
+    }
+
+    #[test]
+    fn test_repeated_named_field_conflict_returns_none() {
+        let parser = Parser::new("{name:w} {name:w}", false).unwrap();
+        assert!(parser.parse("Alice Bob").is_none());
+    }
 
     #[test]
     fn test_parse_simple_anonymous() {
@@ -423,8 +589,7 @@ mod tests {
 
     #[test]
     fn test_parse_named_fields() {
-        let result =
-            parse("User {name} from {city}", "User Alice from Beijing", false).unwrap();
+        let result = parse("User {name} from {city}", "User Alice from Beijing", false).unwrap();
         match result.named.get("name").unwrap() {
             ParseValue::Str(s) => assert_eq!(s, "Alice"),
             other => panic!("Expected Str, got {:?}", other),
@@ -437,8 +602,7 @@ mod tests {
 
     #[test]
     fn test_parse_typed_integer() {
-        let result =
-            parse("{name:w} is {:d} years old", "Alice is 30 years old", false).unwrap();
+        let result = parse("{name:w} is {:d} years old", "Alice is 30 years old", false).unwrap();
         match result.named.get("name").unwrap() {
             ParseValue::Str(s) => assert_eq!(s, "Alice"),
             other => panic!("Expected Str, got {:?}", other),
@@ -481,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_search_basic() {
-        let result = search("is {:d}", "Alice is 30 years old", false).unwrap();
+        let result = search("is {:d}", "Alice is 30 years old", 0, None, false).unwrap();
         match &result.fixed[0] {
             ParseValue::Int(v) => assert_eq!(*v, 30),
             other => panic!("Expected Int(30), got {:?}", other),
@@ -490,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_findall_basic() {
-        let results = findall("{:d}", "I have 3 cats and 5 dogs", false);
+        let results = findall("{:d}", "I have 3 cats and 5 dogs", 0, None, false);
         assert_eq!(results.len(), 2);
         match &results[0].fixed[0] {
             ParseValue::Int(v) => assert_eq!(*v, 3),
