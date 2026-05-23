@@ -345,25 +345,6 @@ Python integration tests comprise:
 - **Project API integration tests** (22 tests): end-to-end coverage of all public APIs
 - **Upstream migration tests** (7 files, 129 tests): cross-implementation behavioral consistency verification, migrated from `parse-original/tests/` with minimal import changes
 
-## Development
-
-```bash
-cd parse-rust
-
-# Rust unit tests
-cargo test --quiet
-
-# Python integration tests
-python -m pytest -q tests
-
-# Benchmarks (requires maturin develop --release first)
-python benches/benchmark_parse_throughput.py
-python benches/benchmark_search_throughput.py
-python benches/benchmark_findall_throughput.py
-python benches/benchmark_parse_latency.py
-python benches/benchmark_fallback_throughput.py
-```
-
 ## Project Structure
 
 ```

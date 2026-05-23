@@ -345,25 +345,6 @@ Python 集成测试包含：
 - **项目自建 API 集成测试**（22 项）：全部公开 API 的端到端覆盖
 - **上游用例迁移对照测试**（7 个文件，129 项）：从 `parse-original/tests/` 迁移，仅做最小 import 调整，用于验证跨实现行为一致性
 
-## 开发命令
-
-```bash
-cd parse-rust
-
-# Rust 单元测试
-cargo test --quiet
-
-# Python 集成测试
-python -m pytest -q tests
-
-# 性能基准测试（需先 maturin develop --release）
-python benches/benchmark_parse_throughput.py
-python benches/benchmark_search_throughput.py
-python benches/benchmark_findall_throughput.py
-python benches/benchmark_parse_latency.py
-python benches/benchmark_fallback_throughput.py
-```
-
 ## 项目结构
 
 ```
