@@ -370,6 +370,7 @@ parse-rust/
 │   ├── test_pattern.py
 │   └── test_security_inputs.py
 └── benches/                # Benchmark 脚本与结果
+    ├── benchmark_common.py   # 共享框架
     ├── benchmark_parse_throughput.py
     ├── benchmark_search_throughput.py
     ├── benchmark_findall_throughput.py
