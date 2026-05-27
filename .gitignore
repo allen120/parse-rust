@@ -1,8 +1,12 @@
 /target
 
+# Dependency lockfile (library, not end-product)
+Cargo.lock
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/
+.pytest-build-stamp
 *.py[cod]
 
 # C extensions
@@ -70,3 +74,6 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+# Claude Code
+.claude/
